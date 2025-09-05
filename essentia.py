@@ -29,7 +29,7 @@ load_dotenv(override=True)
 
 # Configure page
 st.set_page_config(
-    page_title="essentia",
+    page_title="essential",
     page_icon="📑",
     layout="centered",
     initial_sidebar_state="expanded"
@@ -451,7 +451,7 @@ def load_image_as_base64(image_path: str) -> str:
 def render_sidebar():
     """Render sidebar controls"""
     with st.sidebar:
-        book_img_path = "images/essentia.png"
+        book_img_path = "images/essential.png"
         book_b64 = load_image_as_base64(book_img_path)
         
         if book_b64:
@@ -465,7 +465,7 @@ def render_sidebar():
                 </div>
             """, unsafe_allow_html=True)
         else:
-            st.markdown("# 📚 Essentia")
+            st.markdown("# 📚 Essential")
             st.markdown("*Powered by Langchain*")
         st.markdown("---")
         
@@ -523,7 +523,7 @@ def main():
         st.session_state.chatbot = SimplifiedChatbot()
     
     # Main header
-    quickquery_img_path = "images/essentia.png"
+    quickquery_img_path = "images/essential.png"
     quickquery_b64 = load_image_as_base64(quickquery_img_path)
     
     if quickquery_b64:
@@ -533,7 +533,7 @@ def main():
                     <img src="data:image/png;base64,{quickquery_b64}" 
                         style="width: 240px; height: auto; margin-right: 20px;" />
                     <h1 style="margin: 0; font-size: 15px; font-weight: bold;">
-                        Essentia turns long documents into concise, understandable summaries, saving time and making it easier to grasp the key information.
+                        Essential turns long documents into concise, understandable summaries, saving time and making it easier to grasp the key information.
                     </h1>
                 </div>
             </div>
@@ -541,7 +541,7 @@ def main():
     else:
         st.markdown('''
         <div class="main-header">
-            <h1>📑 Essentia turns long documents into concise, understandable summaries, saving time and making it easier to grasp the key information.</h1>
+            <h1>📑 Essential turns long documents into concise, understandable summaries, saving time and making it easier to grasp the key information.</h1>
         </div>
         ''', unsafe_allow_html=True)
     
@@ -604,4 +604,5 @@ def main():
             st.rerun()
 
 if __name__ == "__main__":
+
     main()
