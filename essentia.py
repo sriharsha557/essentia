@@ -11,22 +11,37 @@ from dotenv import load_dotenv
 import pytesseract
 from PIL import Image
 
-# Simplified imports - removed CrewAI
-from langchain_groq import ChatGroq
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.prompts import PromptTemplate
-from langchain.chains import RetrievalQA
+# Simplified imports - with proper error handling
+try:
+    from langchain_groq import ChatGroq
+    from langchain_community.embeddings import HuggingFaceEmbeddings
+    from langchain.prompts import PromptTemplate
+    from langchain.chains import RetrievalQA
+    LANGCHAIN_AVAILABLE = True
+except ImportError as e:
+    st.error(f"LangChain components not available: {e}")
+    LANGCHAIN_AVAILABLE = False
 
 # Document processing imports
-import PyPDF2
-import docx
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import Document
+try:
+    import PyPDF2
+    import docx
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    from langchain.schema import Document
+    DOC_PROCESSING_AVAILABLE = True
+except ImportError as e:
+    st.error(f"Document processing libraries not available: {e}")
+    DOC_PROCESSING_AVAILABLE = False
 
 # Qdrant imports
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
-from langchain_community.vectorstores import Qdrant
+try:
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import Distance, VectorParams
+    from langchain_community.vectorstores import Qdrant
+    QDRANT_AVAILABLE = True
+except ImportError as e:
+    st.error(f"Qdrant not available: {e}")
+    QDRANT_AVAILABLE = False
 
 # Load environment variables
 load_dotenv(override=True)
@@ -56,6 +71,23 @@ def get_api_key(key_name: str) -> str:
 groq_key = get_api_key("GROQ_API_KEY")
 qdrant_url = get_api_key("QDRANT_URL")
 qdrant_api_key = get_api_key("QDRANT_API_KEY")
+
+# Check dependencies first
+if not LANGCHAIN_AVAILABLE or not DOC_PROCESSING_AVAILABLE or not QDRANT_AVAILABLE:
+    st.error("Missing required dependencies. Please install:")
+    st.code("""
+pip install sentence-transformers
+pip install langchain-groq
+pip install langchain-community
+pip install langchain
+pip install PyPDF2
+pip install python-docx
+pip install qdrant-client
+pip install pytesseract
+pip install Pillow
+pip install python-dotenv
+    """)
+    st.stop()
 
 # Validate required keys
 missing_keys = []
@@ -120,6 +152,12 @@ class DocumentProcessor:
     def extract_text_from_image(file_path: str) -> str:
         """Extract text from image using OCR"""
         try:
+            # Check if tesseract is available
+            try:
+                pytesseract.get_tesseract_version()
+            except Exception:
+                return "OCR not available. Please install Tesseract OCR."
+            
             # Open image with PIL
             image = Image.open(file_path)
             
@@ -191,13 +229,19 @@ class VectorStoreManager:
             length_function=len
         )
         
-        # Free embeddings
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
-        )
+        # Initialize embeddings with error handling
+        try:
+            self.embeddings = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2"
+            )
+        except Exception as e:
+            st.error(f"Failed to initialize embeddings: {e}")
+            st.error("Please install sentence-transformers: pip install sentence-transformers")
+            self.embeddings = None
         
-        self._initialize_qdrant()
-        self._load_existing_vectorstore()
+        if self.embeddings:
+            self._initialize_qdrant()
+            self._load_existing_vectorstore()
     
     def _initialize_qdrant(self):
         """Initialize Qdrant connection"""
@@ -214,9 +258,6 @@ class VectorStoreManager:
                     vectors_config=VectorParams(size=384, distance=Distance.COSINE)
                 )
                 
-            else:
-                pass
-                
         except Exception as e:
             st.error(f"Qdrant connection failed: {e}")
             self.qdrant_client = None
@@ -224,7 +265,7 @@ class VectorStoreManager:
     def _load_existing_vectorstore(self):
         """Load existing vectorstore if available"""
         try:
-            if self.qdrant_client:
+            if self.qdrant_client and self.embeddings:
                 self.vectorstore = Qdrant(
                     client=self.qdrant_client,
                     collection_name=self.collection_name,
@@ -244,8 +285,8 @@ class VectorStoreManager:
     def add_documents(self, documents: List[Document]) -> bool:
         """Add documents to vector store"""
         try:
-            if not self.qdrant_client:
-                st.error("Qdrant not initialized")
+            if not self.qdrant_client or not self.embeddings:
+                st.error("Vector store not properly initialized")
                 return False
             
             # Split documents
@@ -388,6 +429,9 @@ Answer:"""
         if not self.llm:
             return "LLM not initialized. Please check your Groq API key.", []
         
+        if not self.vector_store.vectorstore:
+            return "Vector store not initialized. Please check your embeddings setup.", []
+        
         try:
             # Get relevant documents
             relevant_docs = self.vector_store.similarity_search(query, k=5)
@@ -397,12 +441,6 @@ Answer:"""
             
             # Extract sources
             sources = list(set([doc.metadata.get('source', 'Unknown') for doc in relevant_docs]))
-            
-            # Create context from documents
-            context = "\n\n".join([
-                f"Source: {doc.metadata.get('source', 'Unknown')}\n{doc.page_content}"
-                for doc in relevant_docs
-            ])
             
             # Create domain-specific prompt
             prompt = self._create_domain_specific_prompt(query, mode, query_type)
@@ -432,9 +470,14 @@ class SimplifiedChatbot:
         self.vector_store = VectorStoreManager()
         self.rag_system = SimplifiedRAGSystem(self.vector_store)
     
+    def is_ready(self) -> bool:
+        """Check if chatbot is ready to use"""
+        return (self.vector_store.embeddings is not None and 
+                self.rag_system.llm is not None)
+    
     def load_documents(self, uploaded_files) -> bool:
         """Load documents into knowledge base"""
-        if not uploaded_files:
+        if not uploaded_files or not self.is_ready():
             return False
         
         documents = []
@@ -463,8 +506,8 @@ class SimplifiedChatbot:
     
     def process_image_query(self, uploaded_image) -> tuple[str, str, List[str]]:
         """Process image to extract question and generate answer"""
-        if not uploaded_image:
-            return "", "No image uploaded.", []
+        if not uploaded_image or not self.is_ready():
+            return "", "Chatbot not ready. Please check dependencies and API keys.", []
         
         # Extract text from image
         filename, extracted_text = DocumentProcessor.process_uploaded_file(uploaded_image, "image")
@@ -494,6 +537,8 @@ class SimplifiedChatbot:
         return success
     
     def generate_response(self, query: str, mode: str = "Overview") -> tuple[str, List[str]]:
+        if not self.is_ready():
+            return "Chatbot not ready. Please check dependencies and API keys.", []
         return self.rag_system.generate_response(query, mode, "document")
 
 def load_image_as_base64(image_path: str) -> str:
@@ -539,12 +584,14 @@ def render_sidebar():
         st.markdown("---")
         
         # Status indicators
+        chatbot_ready = st.session_state.get('chatbot') and st.session_state.chatbot.is_ready()
+        st.markdown(f"**System Status:** {'✅ Ready' if chatbot_ready else '❌ Not Ready'}")
         st.markdown(f"**Groq LLM:** {'✅ Ready' if groq_key else '❌ Missing'}")
         st.markdown(f"**Qdrant:** {'✅ Connected' if qdrant_url and qdrant_api_key else '❌ Missing'}")
         st.markdown("---")
         
         # Document management
-        st.markdown("### 📁 Knowledge Base")
+        st.markdown("### 📄 Knowledge Base")
         
         if st.session_state.get('documents_loaded', False):
             doc_count = st.session_state.get('document_count', 0)
@@ -561,7 +608,7 @@ def render_sidebar():
             help="Upload your documents to build the knowledge base"
         )
         
-        if uploaded_files:
+        if uploaded_files and chatbot_ready:
             if st.button("📤 Process Documents"):
                 with st.spinner("Processing documents..."):
                     if st.session_state.chatbot.load_documents(uploaded_files):
@@ -579,7 +626,7 @@ def render_sidebar():
             help="Upload an image containing a question in text form"
         )
         
-        if uploaded_image:
+        if uploaded_image and chatbot_ready:
             if st.button("🔍 Process Image Question"):
                 with st.spinner("Extracting text and generating answer..."):
                     extracted_text, response, sources = st.session_state.chatbot.process_image_query(uploaded_image)
@@ -658,6 +705,11 @@ def main():
         </div>
         ''', unsafe_allow_html=True)
     
+    # Check if system is ready
+    if not st.session_state.chatbot.is_ready():
+        st.error("⚠️ System not ready. Please check dependencies and API keys above.")
+        return
+    
     # Sidebar
     response_mode, show_sources = render_sidebar()
     
@@ -668,7 +720,7 @@ def main():
     
     with col1:
         st.markdown("""
-        **📁 Build Knowledge Base:**
+        **📄 Build Knowledge Base:**
         1. Upload PDF/DOCX/TXT documents in the sidebar
         2. Click "Process Documents" to add them to the knowledge base
         3. Use the chat below to ask questions about uploaded documents
