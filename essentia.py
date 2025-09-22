@@ -7,6 +7,10 @@ from datetime import datetime
 import base64
 from dotenv import load_dotenv
 
+# OCR imports
+import pytesseract
+from PIL import Image
+
 # Simplified imports - removed CrewAI
 from langchain_groq import ChatGroq
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -29,8 +33,8 @@ load_dotenv(override=True)
 
 # Configure page
 st.set_page_config(
-    page_title="essential",
-    page_icon="📑",
+    page_title="Essential",
+    page_icon="📖",
     layout="centered",
     initial_sidebar_state="expanded"
 )
@@ -73,6 +77,7 @@ class ChatMessage:
     content: str
     timestamp: datetime
     sources: Optional[List[str]] = None
+    query_type: Optional[str] = None  # "document" or "image"
 
 class DocumentProcessor:
     """Handles document loading and processing"""
@@ -111,8 +116,35 @@ class DocumentProcessor:
             st.error(f"Error processing TXT: {e}")
             return ""
     
+    @staticmethod
+    def extract_text_from_image(file_path: str) -> str:
+        """Extract text from image using OCR"""
+        try:
+            # Open image with PIL
+            image = Image.open(file_path)
+            
+            # Convert to RGB if necessary (for PNG with transparency)
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            
+            # Use Tesseract to extract text
+            extracted_text = pytesseract.image_to_string(image, lang='eng')
+            
+            # Clean up the text
+            extracted_text = extracted_text.strip()
+            
+            if not extracted_text:
+                return "No text could be extracted from the image. Please ensure the image contains clear, readable text."
+            
+            return extracted_text
+            
+        except Exception as e:
+            st.error(f"Error processing image with OCR: {e}")
+            return f"Error extracting text from image: {str(e)}"
+    
     @classmethod
-    def process_uploaded_file(cls, uploaded_file) -> tuple[str, str]:
+    def process_uploaded_file(cls, uploaded_file, file_type: str = "document") -> tuple[str, str]:
+        """Process uploaded file - either document or image"""
         with tempfile.NamedTemporaryFile(delete=False, suffix=uploaded_file.name) as tmp_file:
             tmp_file.write(uploaded_file.getvalue())
             tmp_path = tmp_file.name
@@ -121,15 +153,25 @@ class DocumentProcessor:
         file_ext = filename.lower().split('.')[-1]
         
         try:
-            if file_ext == 'pdf':
-                text = cls.extract_text_from_pdf(tmp_path)
-            elif file_ext == 'docx':
-                text = cls.extract_text_from_docx(tmp_path)
-            elif file_ext == 'txt':
-                text = cls.extract_text_from_txt(tmp_path)
+            if file_type == "image":
+                # Process as image for OCR
+                if file_ext in ['jpg', 'jpeg', 'png']:
+                    text = cls.extract_text_from_image(tmp_path)
+                else:
+                    st.error(f"Unsupported image type: {file_ext}")
+                    text = ""
             else:
-                st.error(f"Unsupported file type: {file_ext}")
-                text = ""
+                # Process as document
+                if file_ext == 'pdf':
+                    text = cls.extract_text_from_pdf(tmp_path)
+                elif file_ext == 'docx':
+                    text = cls.extract_text_from_docx(tmp_path)
+                elif file_ext == 'txt':
+                    text = cls.extract_text_from_txt(tmp_path)
+                else:
+                    st.error(f"Unsupported file type: {file_ext}")
+                    text = ""
+            
             return filename, text
         finally:
             os.unlink(tmp_path)
@@ -278,7 +320,7 @@ class SimplifiedRAGSystem:
         except Exception as e:
             st.error(f"LLM initialization failed: {e}")
     
-    def _create_domain_specific_prompt(self, query: str, mode: str) -> PromptTemplate:
+    def _create_domain_specific_prompt(self, query: str, mode: str, query_type: str = "document") -> PromptTemplate:
         """Create domain-specific prompts based on query content"""
         
         query_lower = query.lower()
@@ -301,6 +343,10 @@ class SimplifiedRAGSystem:
         else:
             system_role = "You are a technical expert who can analyze and explain complex documentation clearly."
         
+        # Modify system role for image queries
+        if query_type == "image":
+            system_role += " You are answering a question that was extracted from an image using OCR."
+        
         if mode == "Overview":
             instruction = """Provide a concise overview with:
 • Key points in bullet format
@@ -316,12 +362,17 @@ Keep it focused and easy to understand."""
 • Integration considerations
 Provide thorough technical depth while maintaining clarity."""
         
+        # Add OCR context if this is an image query
+        ocr_context = ""
+        if query_type == "image":
+            ocr_context = "\n\nNote: This question was extracted from an image using OCR, so there might be minor text recognition errors. Please interpret the question in the most logical way."
+        
         template = f"""{system_role}
 
 Context from documents:
 {{context}}
 
-Question: {{question}}
+Question: {{question}}{ocr_context}
 
 Instructions: {instruction}
 
@@ -332,7 +383,7 @@ Answer:"""
             input_variables=["context", "question"]
         )
     
-    def generate_response(self, query: str, mode: str = "Overview") -> tuple[str, List[str]]:
+    def generate_response(self, query: str, mode: str = "Overview", query_type: str = "document") -> tuple[str, List[str]]:
         """Generate response using simple RAG approach"""
         if not self.llm:
             return "LLM not initialized. Please check your Groq API key.", []
@@ -342,7 +393,7 @@ Answer:"""
             relevant_docs = self.vector_store.similarity_search(query, k=5)
             
             if not relevant_docs:
-                return "No relevant documents found. Please upload documents first.", []
+                return "No relevant documents found. Please upload documents to the knowledge base first.", []
             
             # Extract sources
             sources = list(set([doc.metadata.get('source', 'Unknown') for doc in relevant_docs]))
@@ -354,7 +405,7 @@ Answer:"""
             ])
             
             # Create domain-specific prompt
-            prompt = self._create_domain_specific_prompt(query, mode)
+            prompt = self._create_domain_specific_prompt(query, mode, query_type)
             
             # Create chain
             chain = RetrievalQA.from_chain_type(
@@ -382,6 +433,7 @@ class SimplifiedChatbot:
         self.rag_system = SimplifiedRAGSystem(self.vector_store)
     
     def load_documents(self, uploaded_files) -> bool:
+        """Load documents into knowledge base"""
         if not uploaded_files:
             return False
         
@@ -389,7 +441,7 @@ class SimplifiedChatbot:
         progress_bar = st.progress(0)
         
         for i, uploaded_file in enumerate(uploaded_files):
-            filename, text = DocumentProcessor.process_uploaded_file(uploaded_file)
+            filename, text = DocumentProcessor.process_uploaded_file(uploaded_file, "document")
             
             if text.strip():
                 doc = Document(
@@ -409,6 +461,22 @@ class SimplifiedChatbot:
         
         return False
     
+    def process_image_query(self, uploaded_image) -> tuple[str, str, List[str]]:
+        """Process image to extract question and generate answer"""
+        if not uploaded_image:
+            return "", "No image uploaded.", []
+        
+        # Extract text from image
+        filename, extracted_text = DocumentProcessor.process_uploaded_file(uploaded_image, "image")
+        
+        if not extracted_text or "Error" in extracted_text or "No text could be extracted" in extracted_text:
+            return extracted_text, "Could not extract readable text from the image. Please ensure the image contains clear, readable text.", []
+        
+        # Generate response using RAG
+        response, sources = self.rag_system.generate_response(extracted_text, "Overview", "image")
+        
+        return extracted_text, response, sources
+    
     def _get_document_count(self) -> int:
         try:
             if self.vector_store.qdrant_client:
@@ -426,7 +494,8 @@ class SimplifiedChatbot:
         return success
     
     def generate_response(self, query: str, mode: str = "Overview") -> tuple[str, List[str]]:
-        return self.rag_system.generate_response(query, mode)
+        return self.rag_system.generate_response(query, mode, "document")
+
 def load_image_as_base64(image_path: str) -> str:
     """Load image and convert to base64 - supports both local and git paths"""
     # Define possible paths
@@ -460,13 +529,13 @@ def render_sidebar():
                     <img src="data:image/png;base64,{book_b64}" 
                         style="width: 140px; height: auto; margin-bottom: 10px;" />
                     <p style="margin: 0; font-style: italic; color: #666; font-size: 14px;">
-                        Simplified RAG System
+                        Enhanced RAG System with OCR
                     </p>
                 </div>
             """, unsafe_allow_html=True)
         else:
             st.markdown("# 📚 Essential")
-            st.markdown("*Powered by Langchain*")
+            st.markdown("*Powered by Langchain + OCR*")
         st.markdown("---")
         
         # Status indicators
@@ -475,7 +544,7 @@ def render_sidebar():
         st.markdown("---")
         
         # Document management
-        st.markdown("### 📁 Documents")
+        st.markdown("### 📁 Knowledge Base")
         
         if st.session_state.get('documents_loaded', False):
             doc_count = st.session_state.get('document_count', 0)
@@ -486,10 +555,10 @@ def render_sidebar():
                     st.rerun()
         
         uploaded_files = st.file_uploader(
-            "Upload Documents",
+            "📁 Upload Documents (Enhance Knowledge Base)",
             type=['pdf', 'docx', 'txt'],
             accept_multiple_files=True,
-            help="Upload your documents for analysis"
+            help="Upload your documents to build the knowledge base"
         )
         
         if uploaded_files:
@@ -498,6 +567,50 @@ def render_sidebar():
                     if st.session_state.chatbot.load_documents(uploaded_files):
                         st.success("Documents processed!")
                         st.rerun()
+        
+        st.markdown("---")
+        
+        # Image question uploader
+        st.markdown("### 🖼️ Ask from Image")
+        
+        uploaded_image = st.file_uploader(
+            "🖼️ Upload Image (Ask a Question)",
+            type=['jpg', 'jpeg', 'png'],
+            help="Upload an image containing a question in text form"
+        )
+        
+        if uploaded_image:
+            if st.button("🔍 Process Image Question"):
+                with st.spinner("Extracting text and generating answer..."):
+                    extracted_text, response, sources = st.session_state.chatbot.process_image_query(uploaded_image)
+                    
+                    # Add to chat history
+                    if extracted_text and response:
+                        # Add extracted question as user message
+                        user_msg = ChatMessage(
+                            role="user", 
+                            content=f"[From Image: {uploaded_image.name}] {extracted_text}", 
+                            timestamp=datetime.now(),
+                            query_type="image"
+                        )
+                        st.session_state.chat_history.append(user_msg)
+                        
+                        # Add response as assistant message
+                        assistant_msg = ChatMessage(
+                            role="assistant", 
+                            content=response, 
+                            timestamp=datetime.now(),
+                            sources=sources,
+                            query_type="image"
+                        )
+                        st.session_state.chat_history.append(assistant_msg)
+                        
+                        st.success("Image processed and question answered!")
+                        st.rerun()
+                    else:
+                        st.error("Could not process the image or generate an answer.")
+        
+        st.markdown("---")
         
         # Settings
         st.markdown("### ⚙️ Settings")
@@ -533,7 +646,7 @@ def main():
                     <img src="data:image/png;base64,{quickquery_b64}" 
                         style="width: 240px; height: auto; margin-right: 20px;" />
                     <h1 style="margin: 0; font-size: 15px; font-weight: bold;">
-                        Essential turns long documents into concise, understandable summaries, saving time and making it easier to grasp the key information.
+                        Essential turns long documents into concise summaries and can answer questions from images using OCR.
                     </h1>
                 </div>
             </div>
@@ -541,15 +654,36 @@ def main():
     else:
         st.markdown('''
         <div class="main-header">
-            <h1>📑 Essential turns long documents into concise, understandable summaries, saving time and making it easier to grasp the key information.</h1>
+            <h1>📖 Essential turns long documents into concise summaries and can answer questions from images using OCR.</h1>
         </div>
         ''', unsafe_allow_html=True)
     
     # Sidebar
     response_mode, show_sources = render_sidebar()
     
+    # Instructions
+    st.markdown("### 📋 How to Use")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("""
+        **📁 Build Knowledge Base:**
+        1. Upload PDF/DOCX/TXT documents in the sidebar
+        2. Click "Process Documents" to add them to the knowledge base
+        3. Use the chat below to ask questions about uploaded documents
+        """)
+    
+    with col2:
+        st.markdown("""
+        **🖼️ Ask from Images:**
+        1. Upload an image containing a question in the sidebar
+        2. Click "Process Image Question" to extract text and get an answer
+        3. The extracted question and answer will appear in the chat
+        """)
+    
     # Available topics
-    st.markdown("### 📋 List of Topics Available for Search")
+    st.markdown("### 📋 Available Topics for Search")
     st.markdown("""
     - Data Vault 2.0 Fundamentals
     - Hubs, Links, and Satellites  
@@ -564,20 +698,25 @@ def main():
     # Chat interface
     for message in st.session_state.chat_history:
         if message.role == "user":
-            st.chat_message("user").write(message.content)
+            with st.chat_message("user"):
+                if message.query_type == "image":
+                    st.markdown("🖼️ **Question from Image:**")
+                st.write(message.content)
         else:
             with st.chat_message("assistant"):
+                if message.query_type == "image":
+                    st.markdown("🤖 **Answer from Knowledge Base:**")
                 st.write(message.content)
                 if show_sources and message.sources:
                     st.markdown("**Sources:**")
                     for source in message.sources:
                         st.markdown(f"• {source}")
     
-    # Input
+    # Text input for direct questions
     if st.session_state.documents_loaded:
         if user_input := st.chat_input("Ask about your documents..."):
             # Add user message
-            user_msg = ChatMessage(role="user", content=user_input, timestamp=datetime.now())
+            user_msg = ChatMessage(role="user", content=user_input, timestamp=datetime.now(), query_type="document")
             st.session_state.chat_history.append(user_msg)
             
             # Generate response
@@ -589,13 +728,14 @@ def main():
                 role="assistant", 
                 content=response, 
                 timestamp=datetime.now(),
-                sources=sources if show_sources else None
+                sources=sources if show_sources else None,
+                query_type="document"
             )
             st.session_state.chat_history.append(assistant_msg)
             
             st.rerun()
     else:
-        st.info("Upload documents in the sidebar to start chatting!")
+        st.info("Upload documents in the sidebar to start asking questions, or upload an image with a question!")
     
     # Clear chat
     if st.session_state.chat_history:
@@ -604,5 +744,4 @@ def main():
             st.rerun()
 
 if __name__ == "__main__":
-
     main()
