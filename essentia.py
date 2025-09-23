@@ -423,18 +423,35 @@ class SimplifiedRAGSystem:
         else:
             system_role = "You are a technical expert who can analyze and explain complex documentation clearly."
         
-        # Modify system role for image queries
+        # Special handling for multiple choice questions from images
         if query_type == "image":
-            system_role += " You are answering a question that was extracted from an image using OCR."
-        
-        if mode == "Overview":
-            instruction = """Provide a concise overview with:
+            system_role += " You are answering a multiple choice question that was extracted from an image using OCR."
+            
+            # Check if this looks like a multiple choice question
+            has_choices = any(pattern in query_lower for pattern in [' a)', ' b)', ' c)', ' d)', 'a.', 'b.', 'c.', 'd.', 'a -', 'b -', 'c -', 'd -'])
+            
+            if has_choices:
+                instruction = """This is a multiple choice question. Please:
+
+1. **Identify the main question** clearly
+2. **Analyze each choice (A, B, C, D)** individually against the context
+3. **Determine which choices are correct** - there may be multiple correct answers
+4. **Provide your final answer** in this format:
+   - **Correct Answer(s): [Letter(s)]**
+   - **Explanation:** Brief explanation of why these are correct and others are wrong
+
+Use the context from the documents to support your analysis. Be thorough but concise."""
+            else:
+                instruction = """Provide a comprehensive answer using the context from documents. Focus on accuracy and clarity."""
+        else:
+            if mode == "Overview":
+                instruction = """Provide a concise overview with:
 • Key points in bullet format
 • Brief explanations of important concepts  
 • Practical recommendations if applicable
 Keep it focused and easy to understand."""
-        else:
-            instruction = """Provide a detailed analysis with:
+            else:
+                instruction = """Provide a detailed analysis with:
 • Comprehensive explanation of relevant concepts
 • Technical implementation details
 • Best practices and recommendations
@@ -556,10 +573,42 @@ class SimplifiedChatbot:
         if not extracted_text or "Error" in extracted_text or "No text could be extracted" in extracted_text or "OCR" in extracted_text:
             return extracted_text, "Could not extract readable text from the image. Please ensure the image contains clear, readable text.", []
         
-        # Generate response using RAG
-        response, sources = self.rag_system.generate_response(extracted_text, "Overview", "image")
+        # Check if this looks like a multiple choice question and format it better
+        formatted_text = self._format_multiple_choice_question(extracted_text)
         
-        return extracted_text, response, sources
+        # Generate response using RAG with special handling for multiple choice
+        response, sources = self.rag_system.generate_response(formatted_text, "Overview", "image")
+        
+        return formatted_text, response, sources
+    
+    def _format_multiple_choice_question(self, text: str) -> str:
+        """Format extracted text to better structure multiple choice questions"""
+        import re
+        
+        # Clean up common OCR issues
+        text = text.replace('\n\n', '\n').replace('  ', ' ').strip()
+        
+        # Try to identify and format multiple choice options
+        # Look for patterns like "A)", "A.", "A -", etc.
+        patterns = [
+            r'([ABCD])\s*\)\s*',  # A) format
+            r'([ABCD])\s*\.\s*',  # A. format  
+            r'([ABCD])\s*-\s*',   # A - format
+            r'([ABCD])\s+',       # A format (with space)
+        ]
+        
+        formatted_text = text
+        for pattern in patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                # Add line breaks before each choice for better formatting
+                formatted_text = re.sub(pattern, r'\n\1) ', formatted_text, flags=re.IGNORECASE)
+                break
+        
+        # Clean up extra whitespace and line breaks
+        formatted_text = re.sub(r'\n+', '\n', formatted_text)
+        formatted_text = re.sub(r'^\n+', '', formatted_text)
+        
+        return formatted_text.strip()
     
     def _get_document_count(self) -> int:
         try:
