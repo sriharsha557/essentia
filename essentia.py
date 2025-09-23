@@ -1,15 +1,12 @@
 import streamlit as st
 import tempfile
 import os
+import requests
+import base64
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime
-import base64
 from dotenv import load_dotenv
-
-# OCR imports
-import pytesseract
-from PIL import Image
 
 # Simplified imports - with proper error handling
 try:
@@ -71,6 +68,7 @@ def get_api_key(key_name: str) -> str:
 groq_key = get_api_key("GROQ_API_KEY")
 qdrant_url = get_api_key("QDRANT_URL")
 qdrant_api_key = get_api_key("QDRANT_API_KEY")
+ocr_api_key = get_api_key("API_KEY")  # OCR.space API key
 
 # Check dependencies first
 if not LANGCHAIN_AVAILABLE or not DOC_PROCESSING_AVAILABLE or not QDRANT_AVAILABLE:
@@ -83,8 +81,7 @@ pip install langchain
 pip install PyPDF2
 pip install python-docx
 pip install qdrant-client
-pip install pytesseract
-pip install Pillow
+pip install requests
 pip install python-dotenv
     """)
     st.stop()
@@ -97,6 +94,8 @@ if not qdrant_url:
     missing_keys.append("QDRANT_URL")
 if not qdrant_api_key:
     missing_keys.append("QDRANT_API_KEY")
+if not ocr_api_key:
+    missing_keys.append("API_KEY (OCR.space)")
 
 if missing_keys:
     st.error(f"Missing API keys: {', '.join(missing_keys)}")
@@ -111,8 +110,77 @@ class ChatMessage:
     sources: Optional[List[str]] = None
     query_type: Optional[str] = None  # "document" or "image"
 
+class OCRProcessor:
+    """Handles OCR processing using OCR.space API"""
+    
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.ocr_url = "https://api.ocr.space/parse/image"
+    
+    def extract_text_from_image(self, image_path: str) -> str:
+        """Extract text from image using OCR.space API"""
+        try:
+            # Prepare the payload
+            payload = {
+                'apikey': self.api_key,
+                'language': 'eng',
+                'isOverlayRequired': False,
+                'detectOrientation': True,
+                'scale': True,
+                'OCREngine': 2,  # Use OCR Engine 2 for better accuracy
+            }
+            
+            # Read and encode the image file
+            with open(image_path, 'rb') as image_file:
+                files = {'file': image_file}
+                
+                # Make the API request
+                response = requests.post(self.ocr_url, files=files, data=payload, timeout=30)
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    
+                    # Check if the API call was successful
+                    if result.get('IsErroredOnProcessing', True):
+                        error_message = result.get('ErrorMessage', ['Unknown error'])
+                        if isinstance(error_message, list):
+                            error_message = ', '.join(error_message)
+                        return f"OCR processing error: {error_message}"
+                    
+                    # Extract text from the response
+                    parsed_results = result.get('ParsedResults', [])
+                    if not parsed_results:
+                        return "No text could be extracted from the image. Please ensure the image contains clear, readable text."
+                    
+                    # Combine text from all parsed results
+                    extracted_text = ""
+                    for parsed_result in parsed_results:
+                        text = parsed_result.get('ParsedText', '').strip()
+                        if text:
+                            extracted_text += text + "\n"
+                    
+                    extracted_text = extracted_text.strip()
+                    
+                    if not extracted_text:
+                        return "No text could be extracted from the image. Please ensure the image contains clear, readable text."
+                    
+                    return extracted_text
+                    
+                else:
+                    return f"OCR API request failed with status code: {response.status_code}"
+                    
+        except requests.exceptions.Timeout:
+            return "OCR request timed out. Please try again with a smaller image."
+        except requests.exceptions.RequestException as e:
+            return f"OCR request failed: {str(e)}"
+        except Exception as e:
+            return f"Error processing image: {str(e)}"
+
 class DocumentProcessor:
     """Handles document loading and processing"""
+    
+    def __init__(self, ocr_processor: OCRProcessor):
+        self.ocr_processor = ocr_processor
     
     @staticmethod
     def extract_text_from_pdf(file_path: str) -> str:
@@ -148,40 +216,11 @@ class DocumentProcessor:
             st.error(f"Error processing TXT: {e}")
             return ""
     
-    @staticmethod
-    def extract_text_from_image(file_path: str) -> str:
-        """Extract text from image using OCR"""
-        try:
-            # Check if tesseract is available
-            try:
-                pytesseract.get_tesseract_version()
-            except Exception:
-                return "OCR not available. Please install Tesseract OCR."
-            
-            # Open image with PIL
-            image = Image.open(file_path)
-            
-            # Convert to RGB if necessary (for PNG with transparency)
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-            
-            # Use Tesseract to extract text
-            extracted_text = pytesseract.image_to_string(image, lang='eng')
-            
-            # Clean up the text
-            extracted_text = extracted_text.strip()
-            
-            if not extracted_text:
-                return "No text could be extracted from the image. Please ensure the image contains clear, readable text."
-            
-            return extracted_text
-            
-        except Exception as e:
-            st.error(f"Error processing image with OCR: {e}")
-            return f"Error extracting text from image: {str(e)}"
+    def extract_text_from_image(self, file_path: str) -> str:
+        """Extract text from image using OCR.space API"""
+        return self.ocr_processor.extract_text_from_image(file_path)
     
-    @classmethod
-    def process_uploaded_file(cls, uploaded_file, file_type: str = "document") -> tuple[str, str]:
+    def process_uploaded_file(self, uploaded_file, file_type: str = "document") -> tuple[str, str]:
         """Process uploaded file - either document or image"""
         with tempfile.NamedTemporaryFile(delete=False, suffix=uploaded_file.name) as tmp_file:
             tmp_file.write(uploaded_file.getvalue())
@@ -194,18 +233,18 @@ class DocumentProcessor:
             if file_type == "image":
                 # Process as image for OCR
                 if file_ext in ['jpg', 'jpeg', 'png']:
-                    text = cls.extract_text_from_image(tmp_path)
+                    text = self.extract_text_from_image(tmp_path)
                 else:
                     st.error(f"Unsupported image type: {file_ext}")
                     text = ""
             else:
                 # Process as document
                 if file_ext == 'pdf':
-                    text = cls.extract_text_from_pdf(tmp_path)
+                    text = self.extract_text_from_pdf(tmp_path)
                 elif file_ext == 'docx':
-                    text = cls.extract_text_from_docx(tmp_path)
+                    text = self.extract_text_from_docx(tmp_path)
                 elif file_ext == 'txt':
-                    text = cls.extract_text_from_txt(tmp_path)
+                    text = self.extract_text_from_txt(tmp_path)
                 else:
                     st.error(f"Unsupported file type: {file_ext}")
                     text = ""
@@ -467,6 +506,8 @@ class SimplifiedChatbot:
     """Main chatbot class"""
     
     def __init__(self):
+        self.ocr_processor = OCRProcessor(ocr_api_key)
+        self.document_processor = DocumentProcessor(self.ocr_processor)
         self.vector_store = VectorStoreManager()
         self.rag_system = SimplifiedRAGSystem(self.vector_store)
     
@@ -484,7 +525,7 @@ class SimplifiedChatbot:
         progress_bar = st.progress(0)
         
         for i, uploaded_file in enumerate(uploaded_files):
-            filename, text = DocumentProcessor.process_uploaded_file(uploaded_file, "document")
+            filename, text = self.document_processor.process_uploaded_file(uploaded_file, "document")
             
             if text.strip():
                 doc = Document(
@@ -510,9 +551,9 @@ class SimplifiedChatbot:
             return "", "Chatbot not ready. Please check dependencies and API keys.", []
         
         # Extract text from image
-        filename, extracted_text = DocumentProcessor.process_uploaded_file(uploaded_image, "image")
+        filename, extracted_text = self.document_processor.process_uploaded_file(uploaded_image, "image")
         
-        if not extracted_text or "Error" in extracted_text or "No text could be extracted" in extracted_text:
+        if not extracted_text or "Error" in extracted_text or "No text could be extracted" in extracted_text or "OCR" in extracted_text:
             return extracted_text, "Could not extract readable text from the image. Please ensure the image contains clear, readable text.", []
         
         # Generate response using RAG
@@ -574,13 +615,13 @@ def render_sidebar():
                     <img src="data:image/png;base64,{book_b64}" 
                         style="width: 140px; height: auto; margin-bottom: 10px;" />
                     <p style="margin: 0; font-style: italic; color: #666; font-size: 14px;">
-                        Enhanced RAG System with OCR
+                        Enhanced RAG System with OCR.space
                     </p>
                 </div>
             """, unsafe_allow_html=True)
         else:
             st.markdown("# 📚 Essential")
-            st.markdown("*Powered by Langchain + OCR*")
+            st.markdown("*Powered by Langchain + OCR.space*")
         st.markdown("---")
         
         # Status indicators
@@ -588,6 +629,7 @@ def render_sidebar():
         st.markdown(f"**System Status:** {'✅ Ready' if chatbot_ready else '❌ Not Ready'}")
         st.markdown(f"**Groq LLM:** {'✅ Ready' if groq_key else '❌ Missing'}")
         st.markdown(f"**Qdrant:** {'✅ Connected' if qdrant_url and qdrant_api_key else '❌ Missing'}")
+        st.markdown(f"**OCR.space:** {'✅ Ready' if ocr_api_key else '❌ Missing'}")
         st.markdown("---")
         
         # Document management
@@ -628,34 +670,41 @@ def render_sidebar():
         
         if uploaded_image and chatbot_ready:
             if st.button("🔍 Process Image Question"):
-                with st.spinner("Extracting text and generating answer..."):
+                with st.spinner("Extracting text using OCR.space and generating answer..."):
                     extracted_text, response, sources = st.session_state.chatbot.process_image_query(uploaded_image)
                     
-                    # Add to chat history
-                    if extracted_text and response:
-                        # Add extracted question as user message
-                        user_msg = ChatMessage(
-                            role="user", 
-                            content=f"[From Image: {uploaded_image.name}] {extracted_text}", 
-                            timestamp=datetime.now(),
-                            query_type="image"
-                        )
-                        st.session_state.chat_history.append(user_msg)
+                    # Display extracted text in a text area for user review
+                    if extracted_text and not extracted_text.startswith("Error") and not extracted_text.startswith("OCR"):
+                        st.markdown("**Extracted Text:**")
+                        st.text_area("Text from image:", value=extracted_text, height=100, disabled=True)
                         
-                        # Add response as assistant message
-                        assistant_msg = ChatMessage(
-                            role="assistant", 
-                            content=response, 
-                            timestamp=datetime.now(),
-                            sources=sources,
-                            query_type="image"
-                        )
-                        st.session_state.chat_history.append(assistant_msg)
-                        
-                        st.success("Image processed and question answered!")
-                        st.rerun()
+                        # Add to chat history
+                        if response and not response.startswith("Could not extract"):
+                            # Add extracted question as user message
+                            user_msg = ChatMessage(
+                                role="user", 
+                                content=f"[From Image: {uploaded_image.name}] {extracted_text}", 
+                                timestamp=datetime.now(),
+                                query_type="image"
+                            )
+                            st.session_state.chat_history.append(user_msg)
+                            
+                            # Add response as assistant message
+                            assistant_msg = ChatMessage(
+                                role="assistant", 
+                                content=response, 
+                                timestamp=datetime.now(),
+                                sources=sources,
+                                query_type="image"
+                            )
+                            st.session_state.chat_history.append(assistant_msg)
+                            
+                            st.success("Image processed and question answered!")
+                            st.rerun()
+                        else:
+                            st.error(response)
                     else:
-                        st.error("Could not process the image or generate an answer.")
+                        st.error(extracted_text if extracted_text else "Could not extract text from image")
         
         st.markdown("---")
         
@@ -693,7 +742,7 @@ def main():
                     <img src="data:image/png;base64,{quickquery_b64}" 
                         style="width: 240px; height: auto; margin-right: 20px;" />
                     <h1 style="margin: 0; font-size: 15px; font-weight: bold;">
-                        Essential turns long documents into concise summaries and can answer questions from images using OCR.
+                        Essential turns long documents into concise summaries and can answer questions from images using OCR.space.
                     </h1>
                 </div>
             </div>
@@ -701,7 +750,7 @@ def main():
     else:
         st.markdown('''
         <div class="main-header">
-            <h1>📖 Essential turns long documents into concise summaries and can answer questions from images using OCR.</h1>
+            <h1>📖 Essential turns long documents into concise summaries and can answer questions from images using OCR.space.</h1>
         </div>
         ''', unsafe_allow_html=True)
     
@@ -730,8 +779,8 @@ def main():
         st.markdown("""
         **🖼️ Ask from Images:**
         1. Upload an image containing a question in the sidebar
-        2. Click "Process Image Question" to extract text and get an answer
-        3. The extracted question and answer will appear in the chat
+        2. Click "Process Image Question" to extract text using OCR.space
+        3. Review the extracted text and get an answer from the knowledge base
         """)
     
     # Available topics
