@@ -68,7 +68,7 @@ def get_api_key(key_name: str) -> str:
 groq_key = get_api_key("GROQ_API_KEY")
 qdrant_url = get_api_key("QDRANT_URL")
 qdrant_api_key = get_api_key("QDRANT_API_KEY")
-ocr_api_key = get_api_key("API_KEY")  # OCR.space API key
+ocr_api_key = get_api_key("OCR_SPACE_API_KEY")  # OCR.space API key
 
 # Check dependencies first
 if not LANGCHAIN_AVAILABLE or not DOC_PROCESSING_AVAILABLE or not QDRANT_AVAILABLE:
@@ -95,7 +95,7 @@ if not qdrant_url:
 if not qdrant_api_key:
     missing_keys.append("QDRANT_API_KEY")
 if not ocr_api_key:
-    missing_keys.append("API_KEY (OCR.space)")
+    missing_keys.append("OCR_SPACE_API_KEY")
 
 if missing_keys:
     st.error(f"Missing API keys: {', '.join(missing_keys)}")
