@@ -4,6 +4,7 @@ import tempfile
 import os
 import requests
 import base64
+import json
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime
@@ -842,16 +843,18 @@ def create_paste_input_component():
                     return;
                 }
                 
-                // Send data to Streamlit
+                // Send data to Streamlit with timestamp to ensure uniqueness
                 const data = {
                     type: currentImage ? 'image' : 'text',
                     text: text,
-                    image: currentImage
+                    image: currentImage,
+                    timestamp: Date.now()
                 };
                 
+                // Use Streamlit's setComponentValue
                 window.parent.postMessage({
                     type: 'streamlit:setComponentValue',
-                    value: data
+                    value: JSON.stringify(data)
                 }, '*');
                 
                 // Clear input
@@ -875,6 +878,7 @@ def create_paste_input_component():
     
     result = components.html(html_code, height=200)
     return result
+
 def load_image_as_base64(image_path: str) -> str:
     """Load image and convert to base64 string"""
     try:
@@ -885,6 +889,7 @@ def load_image_as_base64(image_path: str) -> str:
     except Exception as e:
         st.warning(f"Could not load image: {e}")
         return ""
+
 def render_sidebar():
     """Render sidebar controls"""
     with st.sidebar:
@@ -949,8 +954,8 @@ def main():
         st.session_state.documents_loaded = False
     if 'chatbot' not in st.session_state:
         st.session_state.chatbot = SimplifiedChatbot()
-    if 'last_input' not in st.session_state:
-        st.session_state.last_input = None
+    if 'last_timestamp' not in st.session_state:
+        st.session_state.last_timestamp = 0
     
     # Main header with logo
     quickquery_img_path = "images/essential.png"
@@ -983,6 +988,9 @@ def main():
     
     # Sidebar
     response_mode, show_sources = render_sidebar()
+    
+    # Store response_mode in session state
+    st.session_state.response_mode = response_mode
     
     # Instructions
     with st.expander("📋 How to Use", expanded=False):
@@ -1031,94 +1039,91 @@ def main():
     st.markdown("---")
     st.markdown("### 💬 Your Message")
     
-    # Add debug toggle
-    debug_mode = st.checkbox("Show Debug Info", value=False)
-    
     user_input = create_paste_input_component()
     
-    # Debug output
-    if debug_mode:
-        st.write("**Debug Info:**")
-        st.write(f"user_input value: {user_input}")
-        st.write(f"user_input type: {type(user_input)}")
-        st.write(f"last_input: {st.session_state.last_input}")
-    
     # Process input when received
-    if user_input and user_input != st.session_state.last_input:
-        st.session_state.last_input = user_input
-        
-        if debug_mode:
-            st.success("✅ New input detected!")
-        
-        if isinstance(user_input, dict):
-            input_type = user_input.get('type')
-            text_content = user_input.get('text', '').strip()
-            image_data = user_input.get('image')
+    if user_input:
+        try:
+            # Parse the JSON string
+            if isinstance(user_input, str):
+                input_data = json.loads(user_input)
+            else:
+                input_data = user_input
             
-            if debug_mode:
-                st.write(f"Input type: {input_type}")
-                st.write(f"Text content: {text_content}")
-                st.write(f"Has image: {bool(image_data)}")
+            # Check if this is a new message using timestamp
+            current_timestamp = input_data.get('timestamp')
+            last_timestamp = st.session_state.last_timestamp
             
-            
-            if input_type == 'image' and image_data:
-                # Process image with OCR
-                with st.spinner("🔍 Extracting text from image..."):
-                    extracted_text, response, sources = st.session_state.chatbot.process_image_from_base64(image_data)
+            if current_timestamp and current_timestamp != last_timestamp:
+                st.session_state.last_timestamp = current_timestamp
                 
-                if response and not response.startswith("Could not extract"):
-                    # Add user message with image
-                    caption = text_content if text_content else "Question from image"
-                    user_msg = ChatMessage(
-                        role="user",
-                        content=caption,
-                        timestamp=datetime.now(),
-                        query_type="image",
-                        image_data=image_data
-                    )
-                    st.session_state.chat_history.append(user_msg)
+                input_type = input_data.get('type')
+                text_content = input_data.get('text', '').strip()
+                image_data = input_data.get('image')
+                
+                if input_type == 'image' and image_data:
+                    # Process image with OCR
+                    with st.spinner("🔍 Extracting text from image..."):
+                        extracted_text, response, sources = st.session_state.chatbot.process_image_from_base64(image_data)
                     
-                    # Add assistant response
-                    assistant_msg = ChatMessage(
-                        role="assistant",
-                        content=response,
-                        timestamp=datetime.now(),
-                        sources=sources,
-                        query_type="image"
-                    )
-                    st.session_state.chat_history.append(assistant_msg)
-                    st.rerun()
-                else:
-                    st.error(response if response else "Failed to process image")
-            
-            elif input_type == 'text' and text_content:
-                # Process text query
-                if not st.session_state.documents_loaded:
-                    st.warning("⚠️ Please upload documents to the knowledge base first!")
-                else:
-                    # Add user message
-                    user_msg = ChatMessage(
-                        role="user",
-                        content=text_content,
-                        timestamp=datetime.now(),
-                        query_type="document"
-                    )
-                    st.session_state.chat_history.append(user_msg)
-                    
-                    # Generate response
-                    with st.spinner("🤔 Thinking..."):
-                        response, sources = st.session_state.chatbot.generate_response(text_content, response_mode)
-                    
-                    # Add assistant response
-                    assistant_msg = ChatMessage(
-                        role="assistant",
-                        content=response,
-                        timestamp=datetime.now(),
-                        sources=sources,
-                        query_type="document"
-                    )
-                    st.session_state.chat_history.append(assistant_msg)
-                    st.rerun()
+                    if response and not response.startswith("Could not extract"):
+                        # Add user message with image
+                        caption = text_content if text_content else "Question from image"
+                        user_msg = ChatMessage(
+                            role="user",
+                            content=caption,
+                            timestamp=datetime.now(),
+                            query_type="image",
+                            image_data=image_data
+                        )
+                        st.session_state.chat_history.append(user_msg)
+                        
+                        # Add assistant response
+                        assistant_msg = ChatMessage(
+                            role="assistant",
+                            content=response,
+                            timestamp=datetime.now(),
+                            sources=sources,
+                            query_type="image"
+                        )
+                        st.session_state.chat_history.append(assistant_msg)
+                        st.rerun()
+                    else:
+                        st.error(response if response else "Failed to process image")
+                
+                elif input_type == 'text' and text_content:
+                    # Process text query
+                    if not st.session_state.documents_loaded:
+                        st.warning("⚠️ Please upload documents to the knowledge base first!")
+                    else:
+                        # Add user message
+                        user_msg = ChatMessage(
+                            role="user",
+                            content=text_content,
+                            timestamp=datetime.now(),
+                            query_type="document"
+                        )
+                        st.session_state.chat_history.append(user_msg)
+                        
+                        # Generate response
+                        with st.spinner("🤔 Thinking..."):
+                            response, sources = st.session_state.chatbot.generate_response(text_content, response_mode)
+                        
+                        # Add assistant response
+                        assistant_msg = ChatMessage(
+                            role="assistant",
+                            content=response,
+                            timestamp=datetime.now(),
+                            sources=sources,
+                            query_type="document"
+                        )
+                        st.session_state.chat_history.append(assistant_msg)
+                        st.rerun()
+        
+        except json.JSONDecodeError:
+            pass  # Ignore JSON errors from initial empty values
+        except Exception as e:
+            st.error(f"Error processing input: {e}")
     
     # Clear chat button
     if st.session_state.chat_history:
@@ -1126,10 +1131,8 @@ def main():
         with col2:
             if st.button("🗑️ Clear Chat History", use_container_width=True):
                 st.session_state.chat_history = []
-                st.session_state.last_input = None
+                st.session_state.last_timestamp = 0
                 st.rerun()
 
 if __name__ == "__main__":
     main()
-
-
