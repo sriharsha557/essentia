@@ -875,7 +875,16 @@ def create_paste_input_component():
     
     result = components.html(html_code, height=200)
     return result
-
+def load_image_as_base64(image_path: str) -> str:
+    """Load image and convert to base64 string"""
+    try:
+        if os.path.exists(image_path):
+            with open(image_path, "rb") as img_file:
+                return base64.b64encode(img_file.read()).decode()
+        return ""
+    except Exception as e:
+        st.warning(f"Could not load image: {e}")
+        return ""
 def render_sidebar():
     """Render sidebar controls"""
     with st.sidebar:
@@ -1103,3 +1112,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
