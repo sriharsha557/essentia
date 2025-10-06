@@ -1,16 +1,12 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import tempfile
 import os
 import requests
 import base64
-import json
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime
 from dotenv import load_dotenv
-from io import BytesIO
-from PIL import Image
 
 # Simplified imports - with proper error handling
 try:
@@ -72,7 +68,7 @@ def get_api_key(key_name: str) -> str:
 groq_key = get_api_key("GROQ_API_KEY")
 qdrant_url = get_api_key("QDRANT_URL")
 qdrant_api_key = get_api_key("QDRANT_API_KEY")
-ocr_api_key = get_api_key("OCR_SPACE_API_KEY")
+ocr_api_key = get_api_key("OCR_SPACE_API_KEY")  # OCR.space API key
 
 # Check dependencies first
 if not LANGCHAIN_AVAILABLE or not DOC_PROCESSING_AVAILABLE or not QDRANT_AVAILABLE:
@@ -87,7 +83,6 @@ pip install python-docx
 pip install qdrant-client
 pip install requests
 pip install python-dotenv
-pip install Pillow
     """)
     st.stop()
 
@@ -113,8 +108,7 @@ class ChatMessage:
     content: str
     timestamp: datetime
     sources: Optional[List[str]] = None
-    query_type: Optional[str] = None
-    image_data: Optional[str] = None  # Base64 encoded image
+    query_type: Optional[str] = None  # "document" or "image"
 
 class OCRProcessor:
     """Handles OCR processing using OCR.space API"""
@@ -126,32 +120,39 @@ class OCRProcessor:
     def extract_text_from_image(self, image_path: str) -> str:
         """Extract text from image using OCR.space API"""
         try:
+            # Prepare the payload
             payload = {
                 'apikey': self.api_key,
                 'language': 'eng',
                 'isOverlayRequired': False,
                 'detectOrientation': True,
                 'scale': True,
-                'OCREngine': 2,
+                'OCREngine': 2,  # Use OCR Engine 2 for better accuracy
             }
             
+            # Read and encode the image file
             with open(image_path, 'rb') as image_file:
                 files = {'file': image_file}
+                
+                # Make the API request
                 response = requests.post(self.ocr_url, files=files, data=payload, timeout=30)
                 
                 if response.status_code == 200:
                     result = response.json()
                     
+                    # Check if the API call was successful
                     if result.get('IsErroredOnProcessing', True):
                         error_message = result.get('ErrorMessage', ['Unknown error'])
                         if isinstance(error_message, list):
                             error_message = ', '.join(error_message)
                         return f"OCR processing error: {error_message}"
                     
+                    # Extract text from the response
                     parsed_results = result.get('ParsedResults', [])
                     if not parsed_results:
                         return "No text could be extracted from the image. Please ensure the image contains clear, readable text."
                     
+                    # Combine text from all parsed results
                     extracted_text = ""
                     for parsed_result in parsed_results:
                         text = parsed_result.get('ParsedText', '').strip()
@@ -164,6 +165,7 @@ class OCRProcessor:
                         return "No text could be extracted from the image. Please ensure the image contains clear, readable text."
                     
                     return extracted_text
+                    
                 else:
                     return f"OCR API request failed with status code: {response.status_code}"
                     
@@ -173,29 +175,6 @@ class OCRProcessor:
             return f"OCR request failed: {str(e)}"
         except Exception as e:
             return f"Error processing image: {str(e)}"
-    
-    def extract_text_from_base64(self, base64_data: str) -> str:
-        """Extract text from base64 encoded image"""
-        try:
-            # Save base64 to temp file
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_file:
-                # Remove data URL prefix if present
-                if ',' in base64_data:
-                    base64_data = base64_data.split(',')[1]
-                
-                image_bytes = base64.b64decode(base64_data)
-                tmp_file.write(image_bytes)
-                tmp_path = tmp_file.name
-            
-            # Extract text
-            result = self.extract_text_from_image(tmp_path)
-            
-            # Clean up
-            os.unlink(tmp_path)
-            
-            return result
-        except Exception as e:
-            return f"Error processing base64 image: {str(e)}"
 
 class DocumentProcessor:
     """Handles document loading and processing"""
@@ -252,12 +231,14 @@ class DocumentProcessor:
         
         try:
             if file_type == "image":
+                # Process as image for OCR
                 if file_ext in ['jpg', 'jpeg', 'png']:
                     text = self.extract_text_from_image(tmp_path)
                 else:
                     st.error(f"Unsupported image type: {file_ext}")
                     text = ""
             else:
+                # Process as document
                 if file_ext == 'pdf':
                     text = self.extract_text_from_pdf(tmp_path)
                 elif file_ext == 'docx':
@@ -280,18 +261,21 @@ class VectorStoreManager:
         self.qdrant_client = None
         self.collection_name = "essentia_docs"
         
+        # Text splitter
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200,
             length_function=len
         )
         
+        # Initialize embeddings with error handling
         try:
             self.embeddings = HuggingFaceEmbeddings(
                 model_name="sentence-transformers/all-MiniLM-L6-v2"
             )
         except Exception as e:
             st.error(f"Failed to initialize embeddings: {e}")
+            st.error("Please install sentence-transformers: pip install sentence-transformers")
             self.embeddings = None
         
         if self.embeddings:
@@ -304,6 +288,7 @@ class VectorStoreManager:
             self.qdrant_client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
             collections = self.qdrant_client.get_collections()
             
+            # Check if collection exists
             collection_exists = any(c.name == self.collection_name for c in collections.collections)
             
             if not collection_exists:
@@ -343,11 +328,13 @@ class VectorStoreManager:
                 st.error("Vector store not properly initialized")
                 return False
             
+            # Split documents
             chunks = self.text_splitter.split_documents(documents)
             if not chunks:
                 st.error("No text chunks created")
                 return False
             
+            # Create or update vectorstore
             if self.vectorstore is None:
                 self.vectorstore = Qdrant.from_documents(
                     chunks,
@@ -393,7 +380,7 @@ class VectorStoreManager:
         return False
 
 class SimplifiedRAGSystem:
-    """Simplified RAG system using direct LangChain"""
+    """Simplified RAG system without CrewAI - using direct LangChain"""
     
     def __init__(self, vector_store_manager: VectorStoreManager):
         self.vector_store = vector_store_manager
@@ -409,6 +396,7 @@ class SimplifiedRAGSystem:
                 temperature=0.7,
                 max_tokens=1500
             )
+            
         except Exception as e:
             st.error(f"LLM initialization failed: {e}")
     
@@ -417,6 +405,7 @@ class SimplifiedRAGSystem:
         
         query_lower = query.lower()
         
+        # Detect domain based on keywords
         is_data_vault = any(keyword in query_lower for keyword in 
                            ['data vault', 'hub', 'link', 'satellite', 'business key', 'staging'])
         is_airflow = any(keyword in query_lower for keyword in 
@@ -424,6 +413,7 @@ class SimplifiedRAGSystem:
         is_vaultspeed = any(keyword in query_lower for keyword in 
                            ['vaultspeed', 'automation', 'code generation'])
         
+        # Create appropriate system prompt
         if is_data_vault:
             system_role = "You are a Data Vault 2.0 expert with deep knowledge of hubs, links, satellites, and data modeling best practices."
         elif is_airflow:
@@ -433,9 +423,11 @@ class SimplifiedRAGSystem:
         else:
             system_role = "You are a technical expert who can analyze and explain complex documentation clearly."
         
+        # Special handling for multiple choice questions from images
         if query_type == "image":
             system_role += " You are answering a multiple choice question that was extracted from an image using OCR."
             
+            # Check if this looks like a multiple choice question
             has_choices = any(pattern in query_lower for pattern in [' a)', ' b)', ' c)', ' d)', 'a.', 'b.', 'c.', 'd.', 'a -', 'b -', 'c -', 'd -'])
             
             if has_choices:
@@ -467,6 +459,7 @@ Keep it focused and easy to understand."""
 • Integration considerations
 Provide thorough technical depth while maintaining clarity."""
         
+        # Add OCR context if this is an image query
         ocr_context = ""
         if query_type == "image":
             ocr_context = "\n\nNote: This question was extracted from an image using OCR, so there might be minor text recognition errors. Please interpret the question in the most logical way."
@@ -496,15 +489,19 @@ Answer:"""
             return "Vector store not initialized. Please check your embeddings setup.", []
         
         try:
+            # Get relevant documents
             relevant_docs = self.vector_store.similarity_search(query, k=5)
             
             if not relevant_docs:
                 return "No relevant documents found. Please upload documents to the knowledge base first.", []
             
+            # Extract sources
             sources = list(set([doc.metadata.get('source', 'Unknown') for doc in relevant_docs]))
             
+            # Create domain-specific prompt
             prompt = self._create_domain_specific_prompt(query, mode, query_type)
             
+            # Create chain
             chain = RetrievalQA.from_chain_type(
                 llm=self.llm,
                 chain_type="stuff",
@@ -513,6 +510,7 @@ Answer:"""
                 return_source_documents=True
             )
             
+            # Get response
             result = chain({"query": query})
             
             return result["result"], sources
@@ -564,18 +562,21 @@ class SimplifiedChatbot:
         
         return False
     
-    def process_image_from_base64(self, base64_data: str) -> tuple[str, str, List[str]]:
-        """Process base64 image to extract question and generate answer"""
-        if not base64_data or not self.is_ready():
+    def process_image_query(self, uploaded_image) -> tuple[str, str, List[str]]:
+        """Process image to extract question and generate answer"""
+        if not uploaded_image or not self.is_ready():
             return "", "Chatbot not ready. Please check dependencies and API keys.", []
         
-        extracted_text = self.ocr_processor.extract_text_from_base64(base64_data)
+        # Extract text from image
+        filename, extracted_text = self.document_processor.process_uploaded_file(uploaded_image, "image")
         
         if not extracted_text or "Error" in extracted_text or "No text could be extracted" in extracted_text or "OCR" in extracted_text:
             return extracted_text, "Could not extract readable text from the image. Please ensure the image contains clear, readable text.", []
         
+        # Check if this looks like a multiple choice question and format it better
         formatted_text = self._format_multiple_choice_question(extracted_text)
         
+        # Generate response using RAG with special handling for multiple choice
         response, sources = self.rag_system.generate_response(formatted_text, "Overview", "image")
         
         return formatted_text, response, sources
@@ -584,21 +585,26 @@ class SimplifiedChatbot:
         """Format extracted text to better structure multiple choice questions"""
         import re
         
+        # Clean up common OCR issues
         text = text.replace('\n\n', '\n').replace('  ', ' ').strip()
         
+        # Try to identify and format multiple choice options
+        # Look for patterns like "A)", "A.", "A -", etc.
         patterns = [
-            r'([ABCD])\s*\)\s*',
-            r'([ABCD])\s*\.\s*',
-            r'([ABCD])\s*-\s*',
-            r'([ABCD])\s+',
+            r'([ABCD])\s*\)\s*',  # A) format
+            r'([ABCD])\s*\.\s*',  # A. format  
+            r'([ABCD])\s*-\s*',   # A - format
+            r'([ABCD])\s+',       # A format (with space)
         ]
         
         formatted_text = text
         for pattern in patterns:
             if re.search(pattern, text, re.IGNORECASE):
+                # Add line breaks before each choice for better formatting
                 formatted_text = re.sub(pattern, r'\n\1) ', formatted_text, flags=re.IGNORECASE)
                 break
         
+        # Clean up extra whitespace and line breaks
         formatted_text = re.sub(r'\n+', '\n', formatted_text)
         formatted_text = re.sub(r'^\n+', '', formatted_text)
         
@@ -625,276 +631,46 @@ class SimplifiedChatbot:
             return "Chatbot not ready. Please check dependencies and API keys.", []
         return self.rag_system.generate_response(query, mode, "document")
 
-def create_paste_input_component():
-    """Create custom component for text and image input with paste support"""
-    
-    html_code = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <style>
-            body {
-                margin: 0;
-                padding: 0;
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            }
-            
-            .input-container {
-                display: flex;
-                align-items: flex-end;
-                gap: 8px;
-                padding: 12px;
-                background: white;
-                border: 1px solid #e0e0e0;
-                border-radius: 8px;
-                box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-            }
-            
-            .input-wrapper {
-                flex: 1;
-                position: relative;
-            }
-            
-            #messageInput {
-                width: 100%;
-                min-height: 44px;
-                max-height: 200px;
-                padding: 12px;
-                border: 1px solid #d0d0d0;
-                border-radius: 6px;
-                font-size: 14px;
-                resize: none;
-                overflow-y: auto;
-                font-family: inherit;
-                box-sizing: border-box;
-            }
-            
-            #messageInput:focus {
-                outline: none;
-                border-color: #4CAF50;
-                box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.1);
-            }
-            
-            .placeholder {
-                position: absolute;
-                top: 12px;
-                left: 12px;
-                color: #999;
-                pointer-events: none;
-                font-size: 14px;
-            }
-            
-            .button-group {
-                display: flex;
-                gap: 8px;
-            }
-            
-            button {
-                padding: 10px 20px;
-                border: none;
-                border-radius: 6px;
-                font-size: 14px;
-                font-weight: 500;
-                cursor: pointer;
-                transition: all 0.2s;
-                white-space: nowrap;
-            }
-            
-            #sendBtn {
-                background: #4CAF50;
-                color: white;
-            }
-            
-            #sendBtn:hover:not(:disabled) {
-                background: #45a049;
-            }
-            
-            #sendBtn:disabled {
-                background: #cccccc;
-                cursor: not-allowed;
-            }
-            
-            #uploadBtn {
-                background: #2196F3;
-                color: white;
-            }
-            
-            #uploadBtn:hover {
-                background: #0b7dda;
-            }
-            
-            #fileInput {
-                display: none;
-            }
-            
-            .image-preview {
-                margin-top: 8px;
-                padding: 8px;
-                background: #f5f5f5;
-                border-radius: 6px;
-                display: none;
-            }
-            
-            .image-preview img {
-                max-width: 200px;
-                max-height: 200px;
-                border-radius: 4px;
-                display: block;
-            }
-            
-            .image-preview .remove-btn {
-                margin-top: 8px;
-                padding: 4px 12px;
-                background: #f44336;
-                color: white;
-                font-size: 12px;
-            }
-            
-            .hint {
-                font-size: 12px;
-                color: #666;
-                margin-top: 8px;
-                font-style: italic;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="input-container">
-            <div class="input-wrapper">
-                <textarea 
-                    id="messageInput" 
-                    rows="1"
-                ></textarea>
-                <div class="placeholder" id="placeholder">Type a message or paste an image (Ctrl+V)...</div>
-                <div class="image-preview" id="imagePreview">
-                    <img id="previewImg" src="" alt="Pasted image">
-                    <button class="remove-btn" onclick="removeImage()">Remove Image</button>
-                </div>
-            </div>
-            <div class="button-group">
-                <button id="uploadBtn" onclick="triggerFileUpload()">📎 Upload</button>
-                <button id="sendBtn" onclick="sendMessage()">Send</button>
-            </div>
-        </div>
-        <div class="hint">💡 Tip: Press Ctrl+V to paste a screenshot directly!</div>
-        <input type="file" id="fileInput" accept="image/*" onchange="handleFileUpload(event)">
-        
-        <script>
-            let currentImage = null;
-            const messageInput = document.getElementById('messageInput');
-            const placeholder = document.getElementById('placeholder');
-            const sendBtn = document.getElementById('sendBtn');
-            const imagePreview = document.getElementById('imagePreview');
-            const previewImg = document.getElementById('previewImg');
-            
-            // Auto-resize textarea
-            messageInput.addEventListener('input', function() {
-                this.style.height = 'auto';
-                this.style.height = Math.min(this.scrollHeight, 200) + 'px';
-                placeholder.style.display = this.value ? 'none' : 'block';
-            });
-            
-            // Handle paste event
-            document.addEventListener('paste', function(e) {
-                const items = e.clipboardData.items;
-                
-                for (let i = 0; i < items.length; i++) {
-                    if (items[i].type.indexOf('image') !== -1) {
-                        e.preventDefault();
-                        const blob = items[i].getAsFile();
-                        handleImageBlob(blob);
-                        break;
-                    }
-                }
-            });
-            
-            function handleImageBlob(blob) {
-                const reader = new FileReader();
-                reader.onload = function(event) {
-                    currentImage = event.target.result;
-                    previewImg.src = currentImage;
-                    imagePreview.style.display = 'block';
-                    messageInput.placeholder = 'Add a caption (optional)...';
-                };
-                reader.readAsDataURL(blob);
-            }
-            
-            function triggerFileUpload() {
-                document.getElementById('fileInput').click();
-            }
-            
-            function handleFileUpload(event) {
-                const file = event.target.files[0];
-                if (file && file.type.startsWith('image/')) {
-                    handleImageBlob(file);
-                }
-            }
-            
-            function removeImage() {
-                currentImage = null;
-                imagePreview.style.display = 'none';
-                messageInput.placeholder = 'Type a message or paste an image (Ctrl+V)...';
-            }
-            
-            function sendMessage() {
-                const text = messageInput.value.trim();
-                
-                if (!text && !currentImage) {
-                    return;
-                }
-                
-                // Send data to Streamlit with timestamp to ensure uniqueness
-                const data = {
-                    type: currentImage ? 'image' : 'text',
-                    text: text,
-                    image: currentImage,
-                    timestamp: Date.now()
-                };
-                
-                // Use Streamlit's setComponentValue
-                window.parent.postMessage({
-                    type: 'streamlit:setComponentValue',
-                    value: JSON.stringify(data)
-                }, '*');
-                
-                // Clear input
-                messageInput.value = '';
-                messageInput.style.height = 'auto';
-                removeImage();
-                placeholder.style.display = 'block';
-            }
-            
-            // Handle Enter key
-            messageInput.addEventListener('keydown', function(e) {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    sendMessage();
-                }
-            });
-        </script>
-    </body>
-    </html>
-    """
-    
-    result = components.html(html_code, height=200)
-    return result
-
 def load_image_as_base64(image_path: str) -> str:
-    """Load image and convert to base64 string"""
-    try:
-        if os.path.exists(image_path):
-            with open(image_path, "rb") as img_file:
-                return base64.b64encode(img_file.read()).decode()
-        return ""
-    except Exception as e:
-        st.warning(f"Could not load image: {e}")
-        return ""
+    """Load image and convert to base64 - supports both local and git paths"""
+    # Define possible paths
+    local_path = f"D:\\MOOD\\CODE\\{image_path}"
+    git_path = image_path
+    
+    # Try local path first, then git path
+    paths_to_try = [local_path, git_path]
+    
+    for path in paths_to_try:
+        try:
+            if os.path.exists(path):
+                with open(path, "rb") as img_file:
+                    return base64.b64encode(img_file.read()).decode()
+        except Exception as e:
+            continue
+    
+    # If no paths work, show warning but don't error
+    st.warning(f"Image not found at either: {local_path} or {git_path}")
+    return ""
 
 def render_sidebar():
     """Render sidebar controls"""
     with st.sidebar:
-        st.markdown("# 📚 Essential")
-        st.markdown("*Enhanced with Image Paste Support*")
+        book_img_path = "images/essential.png"
+        book_b64 = load_image_as_base64(book_img_path)
+        
+        if book_b64:
+            st.markdown(f"""
+                <div style="text-align: center; margin-bottom: 20px;">
+                    <img src="data:image/png;base64,{book_b64}" 
+                        style="width: 140px; height: auto; margin-bottom: 10px;" />
+                    <p style="margin: 0; font-style: italic; color: #666; font-size: 14px;">
+                        Enhanced RAG System with OCR.space
+                    </p>
+                </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("# 📚 Essential")
+            st.markdown("*Powered by Langchain + OCR.space*")
         st.markdown("---")
         
         # Status indicators
@@ -917,7 +693,7 @@ def render_sidebar():
                     st.rerun()
         
         uploaded_files = st.file_uploader(
-            "📁 Upload Documents",
+            "📁 Upload Documents (Enhance Knowledge Base)",
             type=['pdf', 'docx', 'txt'],
             accept_multiple_files=True,
             help="Upload your documents to build the knowledge base"
@@ -929,6 +705,55 @@ def render_sidebar():
                     if st.session_state.chatbot.load_documents(uploaded_files):
                         st.success("Documents processed!")
                         st.rerun()
+        
+        st.markdown("---")
+        
+        # Image question uploader
+        st.markdown("### 🖼️ Ask from Image")
+        
+        uploaded_image = st.file_uploader(
+            "🖼️ Upload Image (Ask a Question)",
+            type=['jpg', 'jpeg', 'png'],
+            help="Upload an image containing a question in text form"
+        )
+        
+        if uploaded_image and chatbot_ready:
+            if st.button("🔍 Process Image Question"):
+                with st.spinner("Extracting text using OCR.space and generating answer..."):
+                    extracted_text, response, sources = st.session_state.chatbot.process_image_query(uploaded_image)
+                    
+                    # Display extracted text in a text area for user review
+                    if extracted_text and not extracted_text.startswith("Error") and not extracted_text.startswith("OCR"):
+                        st.markdown("**Extracted Text:**")
+                        st.text_area("Text from image:", value=extracted_text, height=100, disabled=True)
+                        
+                        # Add to chat history
+                        if response and not response.startswith("Could not extract"):
+                            # Add extracted question as user message
+                            user_msg = ChatMessage(
+                                role="user", 
+                                content=f"[From Image: {uploaded_image.name}] {extracted_text}", 
+                                timestamp=datetime.now(),
+                                query_type="image"
+                            )
+                            st.session_state.chat_history.append(user_msg)
+                            
+                            # Add response as assistant message
+                            assistant_msg = ChatMessage(
+                                role="assistant", 
+                                content=response, 
+                                timestamp=datetime.now(),
+                                sources=sources,
+                                query_type="image"
+                            )
+                            st.session_state.chat_history.append(assistant_msg)
+                            
+                            st.success("Image processed and question answered!")
+                            st.rerun()
+                        else:
+                            st.error(response)
+                    else:
+                        st.error(extracted_text if extracted_text else "Could not extract text from image")
         
         st.markdown("---")
         
@@ -954,10 +779,8 @@ def main():
         st.session_state.documents_loaded = False
     if 'chatbot' not in st.session_state:
         st.session_state.chatbot = SimplifiedChatbot()
-    if 'last_timestamp' not in st.session_state:
-        st.session_state.last_timestamp = 0
     
-    # Main header with logo
+    # Main header
     quickquery_img_path = "images/essential.png"
     quickquery_b64 = load_image_as_base64(quickquery_img_path)
     
@@ -976,163 +799,99 @@ def main():
     else:
         st.markdown('''
         <div class="main-header">
-            <h1>📖 Essential - Enhanced Chat Interface</h1>
-            <p style="color: #666;">Type messages or paste screenshots directly with Ctrl+V</p>
+            <h1>📖 Essential turns long documents into concise summaries and can answer questions from images using OCR.space.</h1>
         </div>
         ''', unsafe_allow_html=True)
     
     # Check if system is ready
     if not st.session_state.chatbot.is_ready():
-        st.error("⚠️ System not ready. Please check dependencies and API keys.")
+        st.error("⚠️ System not ready. Please check dependencies and API keys above.")
         return
     
     # Sidebar
     response_mode, show_sources = render_sidebar()
     
-    # Store response_mode in session state
-    st.session_state.response_mode = response_mode
-    
     # Instructions
-    with st.expander("📋 How to Use", expanded=False):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("""
-            **💬 Text Messages:**
-            1. Type your question in the input box
-            2. Press Enter or click "Send"
-            3. Get answers from the knowledge base
-            """)
-        
-        with col2:
-            st.markdown("""
-            **🖼️ Image Questions:**
-            1. Press Ctrl+V to paste a screenshot
-            2. Or click "📎 Upload" to select an image
-            3. OCR extracts text and generates an answer
-            """)
+    st.markdown("### 📋 How to Use")
     
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("""
+        **📄 Build Knowledge Base:**
+        1. Upload PDF/DOCX/TXT documents in the sidebar
+        2. Click "Process Documents" to add them to the knowledge base
+        3. Use the chat below to ask questions about uploaded documents
+        """)
+    
+    with col2:
+        st.markdown("""
+        **🖼️ Ask from Images:**
+        1. Upload an image containing a question in the sidebar
+        2. Click "Process Image Question" to extract text using OCR.space
+        3. Review the extracted text and get an answer from the knowledge base
+        """)
+    
+    # Available topics
+    st.markdown("### 📋 Available Topics for Search")
+    st.markdown("""
+    - Data Vault 2.0 Fundamentals
+    - Hubs, Links, and Satellites  
+    - Business Keys and Surrogate Keys
+    - Staging Layer Best Practices
+    - PIT & Bridge Tables
+    - Apache Airflow Orchestration
+    - VaultSpeed Automation
+    """)
     st.markdown("---")
     
-    # Chat history display
-    chat_container = st.container()
+    # Chat interface
+    for message in st.session_state.chat_history:
+        if message.role == "user":
+            with st.chat_message("user"):
+                if message.query_type == "image":
+                    st.markdown("🖼️ **Question from Image:**")
+                st.write(message.content)
+        else:
+            with st.chat_message("assistant"):
+                if message.query_type == "image":
+                    st.markdown("🤖 **Answer from Knowledge Base:**")
+                st.write(message.content)
+                if show_sources and message.sources:
+                    st.markdown("**Sources:**")
+                    for source in message.sources:
+                        st.markdown(f"• {source}")
     
-    with chat_container:
-        for message in st.session_state.chat_history:
-            if message.role == "user":
-                with st.chat_message("user"):
-                    if message.image_data:
-                        st.image(message.image_data, width=300)
-                    if message.content:
-                        st.write(message.content)
-            else:
-                with st.chat_message("assistant"):
-                    if message.query_type == "image":
-                        st.markdown("🤖 **Answer from Knowledge Base:**")
-                    st.write(message.content)
-                    if show_sources and message.sources:
-                        with st.expander("📚 Sources"):
-                            for source in message.sources:
-                                st.markdown(f"• {source}")
-    
-    # Custom input component
-    st.markdown("---")
-    st.markdown("### 💬 Your Message")
-    
-    user_input = create_paste_input_component()
-    
-    # Process input when received
-    if user_input:
-        try:
-            # Parse the JSON string
-            if isinstance(user_input, str):
-                input_data = json.loads(user_input)
-            else:
-                input_data = user_input
+    # Text input for direct questions
+    if st.session_state.documents_loaded:
+        if user_input := st.chat_input("Ask about your documents..."):
+            # Add user message
+            user_msg = ChatMessage(role="user", content=user_input, timestamp=datetime.now(), query_type="document")
+            st.session_state.chat_history.append(user_msg)
             
-            # Check if this is a new message using timestamp
-            current_timestamp = input_data.get('timestamp')
-            last_timestamp = st.session_state.last_timestamp
+            # Generate response
+            with st.spinner("Analyzing..."):
+                response, sources = st.session_state.chatbot.generate_response(user_input, response_mode)
             
-            if current_timestamp and current_timestamp != last_timestamp:
-                st.session_state.last_timestamp = current_timestamp
-                
-                input_type = input_data.get('type')
-                text_content = input_data.get('text', '').strip()
-                image_data = input_data.get('image')
-                
-                if input_type == 'image' and image_data:
-                    # Process image with OCR
-                    with st.spinner("🔍 Extracting text from image..."):
-                        extracted_text, response, sources = st.session_state.chatbot.process_image_from_base64(image_data)
-                    
-                    if response and not response.startswith("Could not extract"):
-                        # Add user message with image
-                        caption = text_content if text_content else "Question from image"
-                        user_msg = ChatMessage(
-                            role="user",
-                            content=caption,
-                            timestamp=datetime.now(),
-                            query_type="image",
-                            image_data=image_data
-                        )
-                        st.session_state.chat_history.append(user_msg)
-                        
-                        # Add assistant response
-                        assistant_msg = ChatMessage(
-                            role="assistant",
-                            content=response,
-                            timestamp=datetime.now(),
-                            sources=sources,
-                            query_type="image"
-                        )
-                        st.session_state.chat_history.append(assistant_msg)
-                        st.rerun()
-                    else:
-                        st.error(response if response else "Failed to process image")
-                
-                elif input_type == 'text' and text_content:
-                    # Process text query
-                    if not st.session_state.documents_loaded:
-                        st.warning("⚠️ Please upload documents to the knowledge base first!")
-                    else:
-                        # Add user message
-                        user_msg = ChatMessage(
-                            role="user",
-                            content=text_content,
-                            timestamp=datetime.now(),
-                            query_type="document"
-                        )
-                        st.session_state.chat_history.append(user_msg)
-                        
-                        # Generate response
-                        with st.spinner("🤔 Thinking..."):
-                            response, sources = st.session_state.chatbot.generate_response(text_content, response_mode)
-                        
-                        # Add assistant response
-                        assistant_msg = ChatMessage(
-                            role="assistant",
-                            content=response,
-                            timestamp=datetime.now(),
-                            sources=sources,
-                            query_type="document"
-                        )
-                        st.session_state.chat_history.append(assistant_msg)
-                        st.rerun()
-        
-        except json.JSONDecodeError:
-            pass  # Ignore JSON errors from initial empty values
-        except Exception as e:
-            st.error(f"Error processing input: {e}")
+            # Add assistant message
+            assistant_msg = ChatMessage(
+                role="assistant", 
+                content=response, 
+                timestamp=datetime.now(),
+                sources=sources if show_sources else None,
+                query_type="document"
+            )
+            st.session_state.chat_history.append(assistant_msg)
+            
+            st.rerun()
+    else:
+        st.info("Upload documents in the sidebar to start asking questions, or upload an image with a question!")
     
-    # Clear chat button
+    # Clear chat
     if st.session_state.chat_history:
-        col1, col2, col3 = st.columns([1, 1, 1])
-        with col2:
-            if st.button("🗑️ Clear Chat History", use_container_width=True):
-                st.session_state.chat_history = []
-                st.session_state.last_timestamp = 0
-                st.rerun()
+        if st.button("🗑️ Clear Chat"):
+            st.session_state.chat_history = []
+            st.rerun()
 
 if __name__ == "__main__":
     main()
