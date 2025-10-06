@@ -1031,16 +1031,35 @@ def main():
     st.markdown("---")
     st.markdown("### 💬 Your Message")
     
+    # Add debug toggle
+    debug_mode = st.checkbox("Show Debug Info", value=False)
+    
     user_input = create_paste_input_component()
+    
+    # Debug output
+    if debug_mode:
+        st.write("**Debug Info:**")
+        st.write(f"user_input value: {user_input}")
+        st.write(f"user_input type: {type(user_input)}")
+        st.write(f"last_input: {st.session_state.last_input}")
     
     # Process input when received
     if user_input and user_input != st.session_state.last_input:
         st.session_state.last_input = user_input
         
+        if debug_mode:
+            st.success("✅ New input detected!")
+        
         if isinstance(user_input, dict):
             input_type = user_input.get('type')
             text_content = user_input.get('text', '').strip()
             image_data = user_input.get('image')
+            
+            if debug_mode:
+                st.write(f"Input type: {input_type}")
+                st.write(f"Text content: {text_content}")
+                st.write(f"Has image: {bool(image_data)}")
+            
             
             if input_type == 'image' and image_data:
                 # Process image with OCR
@@ -1112,4 +1131,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
