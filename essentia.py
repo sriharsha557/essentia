@@ -43,6 +43,125 @@ except ImportError as e:
 # Load environment variables
 load_dotenv(override=True)
 
+# Add this function after your imports and before st.set_page_config()
+
+def inject_pwa_components():
+    """Inject PWA manifest, meta tags, and service worker registration"""
+    
+    pwa_code = """
+    <!-- PWA Meta Tags -->
+    <link rel="manifest" href="/app/static/manifest.json">
+    
+    <!-- Theme Color -->
+    <meta name="theme-color" content="#ff4b4b">
+    <meta name="msapplication-TileColor" content="#ff4b4b">
+    
+    <!-- iOS Meta Tags -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Essential">
+    <link rel="apple-touch-icon" href="/app/static/icons/icon-192x192.png">
+    
+    <!-- Android/Chrome -->
+    <meta name="mobile-web-app-capable" content="yes">
+    
+    <!-- Windows -->
+    <meta name="msapplication-starturl" content="/">
+    <meta name="msapplication-TileImage" content="/app/static/icons/icon-144x144.png">
+    
+    <!-- Additional PWA Meta -->
+    <meta name="description" content="Enhanced RAG System with OCR for document analysis and image-based questions">
+    
+    <!-- Service Worker Registration -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', function() {
+                navigator.serviceWorker.register('/app/static/service-worker.js')
+                    .then(function(registration) {
+                        console.log('✅ Service Worker registered successfully:', registration.scope);
+                        
+                        // Check for updates
+                        registration.addEventListener('updatefound', () => {
+                            const newWorker = registration.installing;
+                            console.log('🔄 Service Worker update found');
+                            
+                            newWorker.addEventListener('statechange', () => {
+                                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                                    console.log('✨ New Service Worker available');
+                                    // Optionally notify user about update
+                                }
+                            });
+                        });
+                    })
+                    .catch(function(error) {
+                        console.log('❌ Service Worker registration failed:', error);
+                    });
+            });
+            
+            // Listen for controller change (new service worker activated)
+            navigator.serviceWorker.addEventListener('controllerchange', () => {
+                console.log('🔄 Service Worker controller changed');
+            });
+        } else {
+            console.log('⚠️ Service Workers not supported in this browser');
+        }
+        
+        // PWA Install prompt handling
+        let deferredPrompt;
+        
+        window.addEventListener('beforeinstallprompt', (e) => {
+            console.log('💾 PWA install prompt available');
+            e.preventDefault();
+            deferredPrompt = e;
+            
+            // Show install button or notification
+            // You could add a custom install button here
+        });
+        
+        window.addEventListener('appinstalled', () => {
+            console.log('✅ PWA installed successfully');
+            deferredPrompt = null;
+        });
+        
+        // Detect if app is running as PWA
+        if (window.matchMedia('(display-mode: standalone)').matches || 
+            window.navigator.standalone === true) {
+            console.log('📱 Running as PWA');
+            document.body.classList.add('pwa-mode');
+        }
+    </script>
+    
+    <!-- PWA Styles -->
+    <style>
+        /* Hide Streamlit branding when running as PWA */
+        .pwa-mode #MainMenu,
+        .pwa-mode footer,
+        .pwa-mode header {
+            visibility: hidden;
+        }
+        
+        /* Optimize for mobile PWA */
+        @media (display-mode: standalone) {
+            body {
+                -webkit-user-select: none;
+                -webkit-tap-highlight-color: transparent;
+                -webkit-touch-callout: none;
+            }
+        }
+        
+        /* Safe area for notched devices */
+        @supports (padding: max(0px)) {
+            .main {
+                padding-left: max(12px, env(safe-area-inset-left));
+                padding-right: max(12px, env(safe-area-inset-right));
+            }
+        }
+    </style>
+    """
+    
+    # Use st.components to inject HTML
+    components.html(pwa_code, height=0)
+
 # Configure page
 st.set_page_config(
     page_title="Essential",
@@ -779,7 +898,7 @@ def main():
         st.session_state.documents_loaded = False
     if 'chatbot' not in st.session_state:
         st.session_state.chatbot = SimplifiedChatbot()
-    
+    inject_pwa_components()
     # Main header
     quickquery_img_path = "images/essential.png"
     quickquery_b64 = load_image_as_base64(quickquery_img_path)
@@ -895,3 +1014,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
