@@ -49,9 +49,61 @@ load_dotenv(override=True)
 def inject_pwa_components():
     """Inject PWA manifest, meta tags, and service worker registration"""
     
-    pwa_code = """
+    # Inline manifest as JSON
+    manifest_json = {
+        "name": "Essential - RAG Document Assistant",
+        "short_name": "Essential",
+        "description": "Enhanced RAG System with OCR for document analysis and image-based questions",
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "background_color": "#ffffff",
+        "theme_color": "#ff4b4b",
+        "orientation": "portrait-primary",
+        "icons": [
+            {
+                "src": "https://github.com/sriharsha557/essentia/main/static/icons/icon-192x192.png",
+                "sizes": "192x192",
+                "type": "image/png",
+                "purpose": "any maskable"
+            },
+            {
+                "src": "https://github.com/sriharsha557/essentia/main/static/icons/icon-512x512.png",
+                "sizes": "512x512",
+                "type": "image/png",
+                "purpose": "any maskable"
+            }
+        ]
+    }
+    
+    import json
+    manifest_data_uri = f"data:application/json;charset=utf-8,{json.dumps(manifest_json)}"
+    
+    # Inline service worker
+    service_worker_code = """
+const CACHE_NAME = 'essential-v1';
+
+self.addEventListener('install', (event) => {
+    console.log('Service Worker installing...');
+    self.skipWaiting();
+});
+
+self.addEventListener('activate', (event) => {
+    console.log('Service Worker activated');
+    self.clients.claim();
+});
+
+self.addEventListener('fetch', (event) => {
+    // Let Streamlit handle all requests
+    return;
+});
+"""
+    
+    service_worker_data_uri = f"data:application/javascript;charset=utf-8,{service_worker_code}"
+    
+    pwa_code = f"""
     <!-- PWA Meta Tags -->
-    <link rel="manifest" href="/app/static/manifest.json">
+    <link rel="manifest" href="{manifest_data_uri}">
     
     <!-- Theme Color -->
     <meta name="theme-color" content="#ff4b4b">
@@ -61,107 +113,78 @@ def inject_pwa_components():
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Essential">
-    <link rel="apple-touch-icon" href="/app/static/icons/icon-192x192.png">
+    <link rel="apple-touch-icon" href="https://github.com/sriharsha557/essentia/static/icons/icon-192x192.png">
     
     <!-- Android/Chrome -->
     <meta name="mobile-web-app-capable" content="yes">
     
-    <!-- Windows -->
-    <meta name="msapplication-starturl" content="/">
-    <meta name="msapplication-TileImage" content="/app/static/icons/icon-144x144.png">
-    
-    <!-- Additional PWA Meta -->
-    <meta name="description" content="Enhanced RAG System with OCR for document analysis and image-based questions">
-    
-    <!-- Service Worker Registration -->
+    <!-- Service Worker Registration with Data URI -->
     <script>
-        if ('serviceWorker' in navigator) {
-            window.addEventListener('load', function() {
-                navigator.serviceWorker.register('/app/static/service-worker.js')
-                    .then(function(registration) {
+        if ('serviceWorker' in navigator) {{
+            window.addEventListener('load', function() {{
+                const serviceWorkerCode = `{service_worker_code}`;
+                const blob = new Blob([serviceWorkerCode], {{ type: 'application/javascript' }});
+                const serviceWorkerUrl = URL.createObjectURL(blob);
+                
+                navigator.serviceWorker.register(serviceWorkerUrl)
+                    .then(function(registration) {{
                         console.log('✅ Service Worker registered successfully:', registration.scope);
-                        
-                        // Check for updates
-                        registration.addEventListener('updatefound', () => {
-                            const newWorker = registration.installing;
-                            console.log('🔄 Service Worker update found');
-                            
-                            newWorker.addEventListener('statechange', () => {
-                                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-                                    console.log('✨ New Service Worker available');
-                                    // Optionally notify user about update
-                                }
-                            });
-                        });
-                    })
-                    .catch(function(error) {
+                    }})
+                    .catch(function(error) {{
                         console.log('❌ Service Worker registration failed:', error);
-                    });
-            });
-            
-            // Listen for controller change (new service worker activated)
-            navigator.serviceWorker.addEventListener('controllerchange', () => {
-                console.log('🔄 Service Worker controller changed');
-            });
-        } else {
-            console.log('⚠️ Service Workers not supported in this browser');
-        }
+                    }});
+            }});
+        }}
         
         // PWA Install prompt handling
         let deferredPrompt;
         
-        window.addEventListener('beforeinstallprompt', (e) => {
+        window.addEventListener('beforeinstallprompt', (e) => {{
             console.log('💾 PWA install prompt available');
             e.preventDefault();
             deferredPrompt = e;
-            
-            // Show install button or notification
-            // You could add a custom install button here
-        });
+        }});
         
-        window.addEventListener('appinstalled', () => {
+        window.addEventListener('appinstalled', () => {{
             console.log('✅ PWA installed successfully');
             deferredPrompt = null;
-        });
+        }});
         
         // Detect if app is running as PWA
         if (window.matchMedia('(display-mode: standalone)').matches || 
-            window.navigator.standalone === true) {
+            window.navigator.standalone === true) {{
             console.log('📱 Running as PWA');
             document.body.classList.add('pwa-mode');
-        }
+        }}
     </script>
     
     <!-- PWA Styles -->
     <style>
-        /* Hide Streamlit branding when running as PWA */
         .pwa-mode #MainMenu,
         .pwa-mode footer,
-        .pwa-mode header {
+        .pwa-mode header {{
             visibility: hidden;
-        }
+        }}
         
-        /* Optimize for mobile PWA */
-        @media (display-mode: standalone) {
-            body {
+        @media (display-mode: standalone) {{
+            body {{
                 -webkit-user-select: none;
                 -webkit-tap-highlight-color: transparent;
                 -webkit-touch-callout: none;
-            }
-        }
+            }}
+        }}
         
-        /* Safe area for notched devices */
-        @supports (padding: max(0px)) {
-            .main {
+        @supports (padding: max(0px)) {{
+            .main {{
                 padding-left: max(12px, env(safe-area-inset-left));
                 padding-right: max(12px, env(safe-area-inset-right));
-            }
-        }
+            }}
+        }}
     </style>
     """
     
-    # Use st.components to inject HTML
     components.html(pwa_code, height=0)
+
 
 # Configure page
 st.set_page_config(
@@ -1015,5 +1038,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
